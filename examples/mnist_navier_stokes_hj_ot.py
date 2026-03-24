@@ -2,7 +2,7 @@
 Predictive Coding Network — MNIST Navier-Stokes HW-OT Classification
 =======================================
 
-Train a predictive coding network on MNIST using the Navier-Stokes energy 
+Train a predictive coding network on MNIST using the Navier-Stokes energy
 on an intermediate latent field and compare HJ-OT optimizer versus Adam.
 """
 
@@ -18,7 +18,9 @@ from fabricpc.utils.helpers import set_jax_flags_before_importing_jax
 
 # We use CPU to align with the smoke test unless GPU is readily available without OOM.
 set_jax_flags_before_importing_jax(jax_platforms="cpu")
-os.environ.setdefault("TFDS_DATA_DIR", os.path.join(tempfile.gettempdir(), "fabricpc_tfds"))
+os.environ.setdefault(
+    "TFDS_DATA_DIR", os.path.join(tempfile.gettempdir(), "fabricpc_tfds")
+)
 
 import jax
 import jax.numpy as jnp
@@ -61,21 +63,25 @@ class MnistNavierStokesLoader:
         return len(self.loader)
 
 
-def create_structure(use_navier_stokes: bool = True):
+def create_structure(use_navier_stokes: bool = True, fluid_channels: int = 16):
     pixels = IdentityNode(shape=(28, 28, 3), name="pixels")
-    
-    fluid_energy = NavierStokesEnergy(
-        viscosity=0.1,
-        data_weight=1.0,
-        latent_ns_weight=0.1,
-        prediction_ns_weight=0.1,
-        momentum_weight=1.0,
-        divergence_weight=1.0,
-    ) if use_navier_stokes else GaussianEnergy()
-    
+
+    if use_navier_stokes:
+        fluid_energy = NavierStokesEnergy(
+            viscosity=0.1,
+            data_weight=1.0,
+            latent_ns_weight=0.1,
+            prediction_ns_weight=0.1,
+            momentum_weight=1.0,
+            divergence_weight=1.0,
+            channel_map={"u": 0, "v": 1, "p": 2},  # Use first 3 channels for NS
+        )
+    else:
+        fluid_energy = GaussianEnergy()
+
     # Intermediate fluid representation layer
     fluid_layer = Linear(
-        shape=(28, 28, 3),
+        shape=(28, 28, fluid_channels),
         activation=IdentityActivation(),
         energy=fluid_energy,
         name="fluid",
@@ -99,26 +105,31 @@ def create_structure(use_navier_stokes: bool = True):
         inference=InferenceSGD(eta_infer=0.05, infer_steps=5),
     )
 
-def train_and_eval(optimizer, name, use_navier_stokes=True, max_epochs=2):
+
+def train_and_eval(
+    optimizer,
+    name,
+    train_loader,
+    test_loader,
+    use_navier_stokes=True,
+    max_epochs=2,
+    fluid_channels=3,
+):
     train_config = {"num_epochs": max_epochs}
-    batch_size = 200
 
     master_rng_key = jax.random.PRNGKey(42)
     graph_key, train_key, eval_key = jax.random.split(master_rng_key, 3)
 
-    structure = create_structure(use_navier_stokes)
+    structure = create_structure(use_navier_stokes, fluid_channels=fluid_channels)
     params = initialize_params(structure, graph_key)
 
-    train_loader = MnistNavierStokesLoader("train", batch_size=batch_size, shuffle=True, seed=42)
-    test_loader = MnistNavierStokesLoader("test", batch_size=batch_size, shuffle=False)
-
     print(f"\n--- Training with {name} ---")
-    
+
     accuracies = []
-    
+
     def epoch_callback(epoch_idx, params, structure, config, rng_key):
         metrics = evaluate_pcn(params, structure, test_loader, config, rng_key)
-        acc = metrics['accuracy'] * 100
+        acc = metrics["accuracy"] * 100
         print(f"[{name}] Epoch {epoch_idx + 1} Test Accuracy: {acc:.2f}%")
         accuracies.append(acc)
         return acc
@@ -132,53 +143,76 @@ def train_and_eval(optimizer, name, use_navier_stokes=True, max_epochs=2):
         config=train_config,
         rng_key=train_key,
         verbose=True,
-        epoch_callback=epoch_callback
+        epoch_callback=epoch_callback,
     )
     elapsed = time.time() - start_time
     print(f"[{name}] Total training time: {elapsed:.2f}s")
-    
+
     return accuracies
 
+
 def main():
-    max_epochs = 40
-    
-    # 1. HJ-OT with Static Viscosity (0.9)
-    # hj_ot_static = hj_ot_optimizer(
-    #     learning_rate=1e-3,
-    #     viscosity=0.9,
-    #     transport_cost=1e-5,
-    #     dt=1.0,
-    #     mass=1.5
-    # )
-    # static_accs = train_and_eval(hj_ot_static, "HJ-OT (Static 0.9)", use_navier_stokes=True, max_epochs=max_epochs)
-    
-    # 2. HJ-OT with Dynamic Viscosity (0.9 -> 0.3)
-    hj_ot_dynamic = hj_ot_optimizer(
-        learning_rate=1e-3,
-        viscosity=0.9,
-        viscosity_decay=0.4,
-        viscosity_min=0.3,
-        transport_cost=1e-5,
-        dt=1.0,
-        mass=1.5
+    use_navier_stokes = True
+    num_epochs = 20
+    batch_size = 200
+    fluid_channels = 16
+
+    train_loader = MnistNavierStokesLoader(
+        "train", batch_size=batch_size, shuffle=True, seed=42
     )
-    dynamic_accs = train_and_eval(hj_ot_dynamic, "HJ-OT (Dynamic 0.9->0.3)", use_navier_stokes=True, max_epochs=max_epochs)
-    
+    test_loader = MnistNavierStokesLoader("test", batch_size=batch_size, shuffle=False)
+
+    total_steps = num_epochs * len(train_loader)
+
+    lr_schedule = optax.cosine_decay_schedule(
+        init_value=5e-4, decay_steps=total_steps, alpha=0.1
+    )
+    optimizer = hj_ot_optimizer(
+        learning_rate=lr_schedule,
+        viscosity=0.9,
+        viscosity_decay=0.7,
+        viscosity_min=0.3,
+        transport_cost=5e-5,
+        nesterov=True,
+    )
+
+    structure = create_structure(
+        use_navier_stokes=use_navier_stokes, fluid_channels=fluid_channels
+    )
+
+    print(f"\n--- Training HJ-OT (Medium-Fluid 16ch, Nesterov) ---")
+    accuracies = train_and_eval(
+        optimizer,
+        "HJ-OT-Nesterov-16ch",
+        train_loader,
+        test_loader,
+        use_navier_stokes=use_navier_stokes,
+        max_epochs=num_epochs,
+        fluid_channels=fluid_channels,
+    )
+
     # Plotting
-    epochs = range(1, max_epochs + 1)
-    
-    plt.figure(figsize=(8, 6))
-    # plt.plot(epochs, static_accs, 'o-', label='Static Visc (0.9)', color='teal')
-    plt.plot(epochs, dynamic_accs, 's-', label='Dynamic Visc (0.9 -> 0.3)', color='crimson')
-    plt.xlabel('Epochs')
-    plt.ylabel('Test Accuracy (%)')
-    plt.title('HJ-OT Viscosity Stability: Static vs Dynamic')
+    epochs = range(1, len(accuracies) + 1)
+    plt.figure(figsize=(10, 7))
+    plt.plot(
+        epochs,
+        accuracies,
+        "o-",
+        label="Medium-Fluid HJ-OT (16ch)",
+        color="blue",
+        linewidth=2,
+    )
+    plt.axhline(y=90.0, color="r", linestyle=":", label="90% Target")
+    plt.xlabel("Epochs", fontsize=12)
+    plt.ylabel("Test Accuracy (%)", fontsize=12)
+    plt.title("Best Variant: Medium-Fluid HJ-OT on MNIST Navier-Stokes", fontsize=14)
     plt.legend()
-    plt.grid(True)
-    
-    plot_path = os.path.join(os.getcwd(), 'examples', 'navier_stokes_accuracy_comparison.png')
+    plt.grid(True, linestyle="--", alpha=0.7)
+
+    plot_path = os.path.join(os.getcwd(), "examples", "navier_stokes_best_variant.png")
     plt.savefig(plot_path)
-    print(f"\nSaved visualization to {plot_path}")
+    print(f"\nSaved best-variant visualization to {plot_path}")
+
 
 if __name__ == "__main__":
     main()

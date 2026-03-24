@@ -1,0 +1,8 @@
+HJ-OT Hyperparameter Tuning Results
+===================================
+Trial 0: Accuracy=86.4100, Params={'learning_rate': 0.00011169723811887821, 'viscosity': 0.6146472275349867, 'viscosity_decay': 0.988800307566192, 'transport_cost': 0.0001593722614795755}
+Trial 1: Accuracy=86.4900, Params={'learning_rate': 0.00017564378452586564, 'viscosity': 0.9673119642465994, 'viscosity_decay': 0.784524523682743, 'transport_cost': 2.358740156008131e-06}
+
+BEST TRIAL:
+Accuracy: 86.49%
+Params: {'learning_rate': 0.00017564378452586564, 'viscosity': 0.9673119642465994, 'viscosity_decay': 0.784524523682743, 'transport_cost': 2.358740156008131e-06}
