@@ -1,20 +1,9 @@
-"""
-Deep Convolutional Incompressible Flow Network (CIFN) Scaling for MNIST.
-
-Targets 99.0%+ accuracy by combining:
-1. Conv2D layers with Navier-Stokes energy (Incompressible Flow).
-2. Deeper architecture (3 Conv + 2 Linear).
-3. Advanced AHJ-OT optimizer with Cosine Decay.
-"""
-
 import os
-import time
-import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
-import matplotlib.pyplot as plt
-
+import numpy as np
+import itertools
 from fabricpc.nodes import Conv2D, Linear, IdentityNode
 from fabricpc.builder import Edge, TaskMap, graph
 from fabricpc.graph import initialize_params
@@ -31,24 +20,32 @@ from fabricpc.training.hj_ot import hj_ot_optimizer
 from fabricpc.graph.state_initializer import FeedforwardStateInit
 
 
-def mnist_to_uvp(images: np.ndarray) -> jnp.ndarray:
-    """Map MNIST grayscale images to a (u, v, p) field."""
+def mnist_to_uvp(images):
     u = images
     v = images
     p = np.zeros_like(images)
     return np.concatenate([u, v, p], axis=-1).astype(np.float32)
 
 
-def create_cifn_structure():
-    # Input image (28x28x3)
-    pixels = IdentityNode(shape=(28, 28, 3), name="pixels")
+class UVPWrapper:
+    def __init__(self, loader):
+        self.loader = loader
 
-    # Layer 1: Incompressible Conv2D
+    def __iter__(self):
+        for images, labels in self.loader:
+            yield {"x": mnist_to_uvp(images), "y": labels}
+
+    def __len__(self):
+        return len(self.loader)
+
+
+def create_cifn_structure():
+    pixels = IdentityNode(shape=(28, 28, 3), name="pixels")
     fluid1_energy = NavierStokesEnergy(
-        viscosity=0.5,  # Increased for stability
-        latent_ns_weight=0.05,  # Lowered initially
+        viscosity=0.5,
+        latent_ns_weight=0.05,
         prediction_ns_weight=0.05,
-        momentum_weight=0.5,  # Reduced to prioritize classification
+        momentum_weight=0.5,
         divergence_weight=0.5,
         data_weight=1.0,
     )
@@ -60,8 +57,6 @@ def create_cifn_structure():
         activation=GeluActivation(),
         energy=fluid1_energy,
     )
-
-    # Layer 2: Pooling Conv2D (Stride 2)
     fluid2 = Conv2D(
         shape=(14, 14, 32),
         name="fluid2",
@@ -71,8 +66,6 @@ def create_cifn_structure():
         activation=GeluActivation(),
         energy=GaussianEnergy(precision=2.0),
     )
-
-    # Layer 3: Feature Conv2D (Stride 2)
     fluid3 = Conv2D(
         shape=(7, 7, 64),
         name="fluid3",
@@ -82,16 +75,9 @@ def create_cifn_structure():
         activation=GeluActivation(),
         energy=GaussianEnergy(precision=2.0),
     )
-
-    # Layer 4: Dense Layer
     fc1 = Linear(
-        shape=(128,),
-        name="fc1",
-        activation=GeluActivation(),
-        flatten_input=True,
+        shape=(128,), name="fc1", activation=GeluActivation(), flatten_input=True
     )
-
-    # Output: Class Projection
     output = Linear(
         shape=(10,),
         activation=SoftmaxActivation(),
@@ -99,7 +85,6 @@ def create_cifn_structure():
         name="class",
         flatten_input=True,
     )
-
     return graph(
         nodes=[pixels, fluid1, fluid2, fluid3, fc1, output],
         edges=[
@@ -115,38 +100,8 @@ def create_cifn_structure():
     )
 
 
-class UVPWrapper:
-    def __init__(self, loader):
-        self.loader = loader
-
-    def __iter__(self):
-        for images, labels in self.loader:
-            yield {"x": mnist_to_uvp(images), "y": labels}
-
-    def __len__(self):
-        return len(self.loader)
-
-
 def main():
-    max_epochs = 30
     batch_size = 128
-
-    # Optimizer with Cosine Schedule
-    steps_per_epoch = 60000 // batch_size
-    lr_schedule = optax.cosine_decay_schedule(
-        init_value=5e-4, decay_steps=max_epochs * steps_per_epoch, alpha=0.1
-    )
-    optimizer = hj_ot_optimizer(
-        learning_rate=lr_schedule,
-        viscosity=0.7,
-        transport_cost=1e-5,
-        weight_decay=1e-4,
-    )
-
-    structure = create_cifn_structure()
-    params = initialize_params(structure, jax.random.PRNGKey(42))
-
-    # Loaders with simple augmentations (simulated by noise for this script)
     train_loader = MnistLoader(
         "train", batch_size=batch_size, shuffle=True, tensor_format="NHWC"
     )
@@ -154,27 +109,35 @@ def main():
         "test", batch_size=batch_size, shuffle=False, tensor_format="NHWC"
     )
 
-    wrapped_train = UVPWrapper(train_loader)
-    wrapped_test = UVPWrapper(test_loader)
+    # Take only 10 batches (1280 images)
+    train_subset = list(itertools.islice(UVPWrapper(train_loader), 10))
+    test_subset = list(itertools.islice(UVPWrapper(test_loader), 5))
 
-    print(f"Starting Deep CIFN training (3 Conv + 2 Linear) on {jax.devices()}")
+    lr_schedule = optax.cosine_decay_schedule(
+        init_value=5e-4, decay_steps=100, alpha=0.1
+    )
+    optimizer = hj_ot_optimizer(
+        learning_rate=lr_schedule, viscosity=0.7, transport_cost=1e-5, weight_decay=1e-4
+    )
 
-    def epoch_callback(epoch, params, structure, config, key):
-        metrics = evaluate_pcn(params, structure, wrapped_test, config, key)
-        acc = metrics["accuracy"] * 100
-        print(f"Epoch {epoch+1} Test Accuracy: {acc:.2f}%")
-        return acc
+    structure = create_cifn_structure()
+    params = initialize_params(structure, jax.random.PRNGKey(42))
 
+    print(f"Starting FAST verification subset on {jax.devices()}")
     trained_params, _, _ = train_pcn(
         params=params,
         structure=structure,
-        train_loader=wrapped_train,
+        train_loader=train_subset,
         optimizer=optimizer,
-        config={"num_epochs": max_epochs},
+        config={"num_epochs": 1},
         rng_key=jax.random.PRNGKey(0),
-        epoch_callback=epoch_callback,
         verbose=True,
     )
+
+    metrics = evaluate_pcn(
+        trained_params, structure, test_subset, {}, jax.random.PRNGKey(1)
+    )
+    print(f"FAST Verification Test Accuracy: {metrics['accuracy'] * 100:.2f}%")
 
 
 if __name__ == "__main__":
