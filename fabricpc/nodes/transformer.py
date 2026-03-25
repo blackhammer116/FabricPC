@@ -149,6 +149,7 @@ class TransformerBlock(NodeBase):
         rope_theta: float = 10000.0,
         weight_init: Optional[InitializerBase] = KaimingInitializer(),
         latent_init: Optional[InitializerBase] = NormalInitializer(),
+        **extra_config,
     ):
         super().__init__(
             shape=shape,
@@ -164,6 +165,7 @@ class TransformerBlock(NodeBase):
             pre_norm=pre_norm,
             use_rope=use_rope,
             rope_theta=rope_theta,
+            **extra_config,
         )
 
     @staticmethod

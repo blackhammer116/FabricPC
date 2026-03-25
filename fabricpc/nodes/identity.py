@@ -126,9 +126,12 @@ class IdentityNode(NodeBase):
             else:
                 z_mu = z_mu + x
 
-        z_mu = (
-            z_mu * node_info.node_config["scale"]
-        )  # Apply fixed scaling factor (default is 1.0)
+        if z_mu is None:
+            # Source node behavior: prediction is the latent state itself
+            z_mu = state.z_latent
+        else:
+            # Apply fixed scaling factor (default is 1.0)
+            z_mu = z_mu * node_info.node_config.get("scale", 1.0)
 
         # For identity node, pre_activation equals z_mu (no activation transform)
         pre_activation = z_mu

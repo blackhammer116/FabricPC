@@ -15,7 +15,9 @@ from fabricpc.nodes.base import (
 )
 
 from fabricpc.nodes.linear import Linear, LinearExplicitGrad
+from fabricpc.nodes.conv2d import Conv2D
 from fabricpc.nodes.transformer import TransformerBlock
+from fabricpc.nodes.ifn_transformer import IFNTransformerBlock
 from fabricpc.nodes.identity import IdentityNode
 from fabricpc.nodes.transformer_v2 import (
     EmbeddingNode,
@@ -38,7 +40,9 @@ __all__ = [
     # Built-in nodes (full names)
     "Linear",
     "LinearExplicitGrad",
+    "Conv2D",
     "TransformerBlock",
+    "IFNTransformerBlock",
     "IdentityNode",
     "EmbeddingNode",
     "MhaResidualNode",
