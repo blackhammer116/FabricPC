@@ -271,3 +271,131 @@ class HardTanhActivation(ActivationBase):
         min_val = config.get("min_val", -1.0) if config else -1.0
         max_val = config.get("max_val", 1.0) if config else 1.0
         return ((x > min_val) & (x < max_val)).astype(jnp.float32)
+
+
+class FluidActivation(ActivationBase):
+    """
+    Physics-informed activation for Navier-Stokes energy layers.
+
+    Applies channel-aware non-linearities that respect the physical roles of
+    velocity (u, v) and pressure (p) channels:
+    - Velocity channels: tanh(x * velocity_gain) — bounded, smooth, preserves
+      spatial gradients needed for divergence/momentum computation.
+    - Pressure channels: softplus(x * pressure_gain) — unbounded, non-negative,
+      appropriate for the pressure field's physical role.
+    - Extra channels (beyond u, v, p): treated as velocity-like.
+
+    Optionally applies spectral sharpening (local contrast enhancement) to
+    improve feature discrimination within the NS energy landscape.
+
+    Args:
+        velocity_gain: Temperature scaling for velocity channel activation (default: 1.5)
+        pressure_gain: Temperature scaling for pressure channel activation (default: 0.8)
+        sharpening: Spectral sharpening strength; 0.0 disables (default: 0.1)
+        n_velocity_channels: Number of leading channels treated as velocity (default: 2)
+    """
+
+    def __init__(
+        self,
+        velocity_gain: float = 1.5,
+        pressure_gain: float = 0.8,
+        sharpening: float = 0.1,
+        n_velocity_channels: int = 2,
+    ):
+        super().__init__(
+            velocity_gain=velocity_gain,
+            pressure_gain=pressure_gain,
+            sharpening=sharpening,
+            n_velocity_channels=n_velocity_channels,
+        )
+
+    @staticmethod
+    def forward(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        vg = config.get("velocity_gain", 1.5) if config else 1.5
+        pg = config.get("pressure_gain", 0.8) if config else 0.8
+        sharpening = config.get("sharpening", 0.1) if config else 0.1
+        n_vel = config.get("n_velocity_channels", 2) if config else 2
+
+        n_channels = x.shape[-1]
+        # Pressure is the channel right after velocity channels
+        n_pressure = 1 if n_channels > n_vel else 0
+        n_extra = max(0, n_channels - n_vel - n_pressure)
+
+        # Split along channel axis
+        parts = []
+        idx = 0
+
+        # Velocity channels: bounded tanh
+        if n_vel > 0:
+            vel = x[..., idx : idx + n_vel]
+            vel_act = jnp.tanh(vel * vg)
+            parts.append(vel_act)
+            idx += n_vel
+
+        # Pressure channel: unbounded softplus
+        if n_pressure > 0:
+            pres = x[..., idx : idx + n_pressure]
+            pres_act = nn.softplus(pres * pg)
+            parts.append(pres_act)
+            idx += n_pressure
+
+        # Extra channels: velocity-like tanh
+        if n_extra > 0:
+            extra = x[..., idx:]
+            extra_act = jnp.tanh(extra * vg)
+            parts.append(extra_act)
+
+        result = jnp.concatenate(parts, axis=-1)
+
+        # Spectral sharpening: local contrast enhancement
+        if sharpening > 0.0 and x.ndim >= 3:
+            # Compute channel-wise spatial mean and subtract scaled version
+            # This enhances local contrast without breaking channel structure
+            spatial_axes = tuple(range(1, x.ndim - 1))
+            if len(spatial_axes) > 0:
+                spatial_mean = jnp.mean(result, axis=spatial_axes, keepdims=True)
+                result = result + sharpening * (result - spatial_mean)
+
+        return result
+
+    @staticmethod
+    def derivative(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        vg = config.get("velocity_gain", 1.5) if config else 1.5
+        pg = config.get("pressure_gain", 0.8) if config else 0.8
+        sharpening = config.get("sharpening", 0.1) if config else 0.1
+        n_vel = config.get("n_velocity_channels", 2) if config else 2
+
+        n_channels = x.shape[-1]
+        n_pressure = 1 if n_channels > n_vel else 0
+        n_extra = max(0, n_channels - n_vel - n_pressure)
+
+        parts = []
+        idx = 0
+
+        # Velocity derivative: vg * (1 - tanh²(x * vg))
+        if n_vel > 0:
+            vel = x[..., idx : idx + n_vel]
+            t = jnp.tanh(vel * vg)
+            parts.append(vg * (1 - t**2))
+            idx += n_vel
+
+        # Pressure derivative: pg * sigmoid(x * pg)
+        if n_pressure > 0:
+            pres = x[..., idx : idx + n_pressure]
+            parts.append(pg * nn.sigmoid(pres * pg))
+            idx += n_pressure
+
+        # Extra channels derivative: same as velocity
+        if n_extra > 0:
+            extra = x[..., idx:]
+            t = jnp.tanh(extra * vg)
+            parts.append(vg * (1 - t**2))
+
+        result = jnp.concatenate(parts, axis=-1)
+
+        # Sharpening correction: d/dx of (f + s*(f - mean(f)))
+        # = f' * (1 + s) - s * mean(f')  ≈ f' * (1 + s) for large spatial dims
+        if sharpening > 0.0:
+            result = result * (1.0 + sharpening)
+
+        return result

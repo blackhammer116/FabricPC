@@ -23,6 +23,7 @@ from fabricpc.core.activations import (
     GeluActivation,
     SoftmaxActivation,
     HardTanhActivation,
+    FluidActivation,
 )
 
 # Energy functions
@@ -81,6 +82,7 @@ __all__ = [
     "GeluActivation",
     "SoftmaxActivation",
     "HardTanhActivation",
+    "FluidActivation",
     # Energy functions
     "EnergyFunctional",
     "GaussianEnergy",
