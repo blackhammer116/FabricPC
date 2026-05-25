@@ -363,30 +363,45 @@ def _navier_stokes_residual_energy(
     dy = config.get("dy", 1.0)
     momentum_weight = config.get("momentum_weight", 1.0)
     divergence_weight = config.get("divergence_weight", 1.0)
+    multi_field = config.get("multi_field", False)
 
-    u = x[..., channel_map["u"]]
-    v = x[..., channel_map["v"]]
-    p = x[..., channel_map["p"]]
+    def compute_single_residual(u, v, p):
+        dudx = _periodic_central_diff_x(u, dx)
+        dudy = _periodic_central_diff_y(u, dy)
+        dvdx = _periodic_central_diff_x(v, dx)
+        dvdy = _periodic_central_diff_y(v, dy)
+        dpdx = _periodic_central_diff_x(p, dx)
+        dpdy = _periodic_central_diff_y(p, dy)
 
-    dudx = _periodic_central_diff_x(u, dx)
-    dudy = _periodic_central_diff_y(u, dy)
-    dvdx = _periodic_central_diff_x(v, dx)
-    dvdy = _periodic_central_diff_y(v, dy)
-    dpdx = _periodic_central_diff_x(p, dx)
-    dpdy = _periodic_central_diff_y(p, dy)
+        lap_u = _periodic_laplacian(u, dx, dy)
+        lap_v = _periodic_laplacian(v, dx, dy)
 
-    lap_u = _periodic_laplacian(u, dx, dy)
-    lap_v = _periodic_laplacian(v, dx, dy)
+        residual_u = u * dudx + v * dudy + dpdx - viscosity * lap_u
+        residual_v = u * dvdx + v * dvdy + dpdy - viscosity * lap_v
+        divergence = dudx + dvdy
 
-    residual_u = u * dudx + v * dudy + dpdx - viscosity * lap_u
-    residual_v = u * dvdx + v * dvdy + dpdy - viscosity * lap_v
-    divergence = dudx + dvdy
+        m_energy = 0.5 * momentum_weight * _sum_non_batch(residual_u**2 + residual_v**2)
+        d_energy = 0.5 * divergence_weight * _sum_non_batch(divergence**2)
+        return m_energy + d_energy
 
-    momentum_energy = (
-        0.5 * momentum_weight * _sum_non_batch(residual_u**2 + residual_v**2)
-    )
-    divergence_energy = 0.5 * divergence_weight * _sum_non_batch(divergence**2)
-    return momentum_energy + divergence_energy
+    if not multi_field:
+        u = x[..., channel_map["u"]]
+        v = x[..., channel_map["v"]]
+        p = x[..., channel_map["p"]]
+        return compute_single_residual(u, v, p)
+    else:
+        # Multi-field mode: apply to all possible triplets
+        n_channels = x.shape[-1]
+        n_triplets = n_channels // 3
+        total_energy = jnp.zeros(x.shape[0])
+
+        for i in range(n_triplets):
+            u = x[..., i * 3]
+            v = x[..., i * 3 + 1]
+            p = x[..., i * 3 + 2]
+            total_energy += compute_single_residual(u, v, p)
+
+        return total_energy
 
 
 class NavierStokesEnergy(EnergyFunctional):
@@ -399,6 +414,9 @@ class NavierStokesEnergy(EnergyFunctional):
     - momentum residual on z_latent
     - momentum residual on z_mu
     - divergence penalties on z_latent and z_mu
+
+    Attributes:
+        multi_field: If True, applies NS residual to all channel triplets (u, v, p).
     """
 
     def __init__(
@@ -412,6 +430,7 @@ class NavierStokesEnergy(EnergyFunctional):
         momentum_weight: float = 1.0,
         divergence_weight: float = 1.0,
         channel_map: Dict[str, int] = None,
+        multi_field: bool = False,
     ):
         super().__init__(
             viscosity=viscosity,
@@ -423,6 +442,7 @@ class NavierStokesEnergy(EnergyFunctional):
             momentum_weight=momentum_weight,
             divergence_weight=divergence_weight,
             channel_map=channel_map or {"u": 0, "v": 1, "p": 2},
+            multi_field=multi_field,
         )
 
     @staticmethod
