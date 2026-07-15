@@ -364,6 +364,7 @@ def _navier_stokes_residual_energy(
     momentum_weight = config.get("momentum_weight", 1.0)
     divergence_weight = config.get("divergence_weight", 1.0)
     multi_field = config.get("multi_field", False)
+    multi_field_reduction = config.get("multi_field_reduction", "sum")
 
     def compute_single_residual(u, v, p):
         dudx = _periodic_central_diff_x(u, dx)
@@ -401,6 +402,9 @@ def _navier_stokes_residual_energy(
             p = x[..., i * 3 + 2]
             total_energy += compute_single_residual(u, v, p)
 
+        if multi_field_reduction == "mean" and n_triplets > 0:
+            total_energy = total_energy / n_triplets
+
         return total_energy
 
 
@@ -431,7 +435,10 @@ class NavierStokesEnergy(EnergyFunctional):
         divergence_weight: float = 1.0,
         channel_map: Dict[str, int] = None,
         multi_field: bool = False,
+        multi_field_reduction: str = "sum",
     ):
+        if multi_field_reduction not in {"sum", "mean"}:
+            raise ValueError("multi_field_reduction must be 'sum' or 'mean'")
         super().__init__(
             viscosity=viscosity,
             dx=dx,
@@ -443,6 +450,7 @@ class NavierStokesEnergy(EnergyFunctional):
             divergence_weight=divergence_weight,
             channel_map=channel_map or {"u": 0, "v": 1, "p": 2},
             multi_field=multi_field,
+            multi_field_reduction=multi_field_reduction,
         )
 
     @staticmethod
@@ -485,6 +493,46 @@ class NavierStokesEnergy(EnergyFunctional):
         def total_energy(latent):
             return jnp.sum(
                 NavierStokesEnergy.energy(latent, z_mu, config=config, context=context)
+            )
+
+        return jax.grad(total_energy)(z_latent)
+
+
+class SequenceNavierStokesEnergy(NavierStokesEnergy):
+    """Navier-Stokes energy for sequence states shaped ``(B, S, D)``.
+
+    The embedding dimension is grouped into complete ``(u, v, p)`` triplets,
+    yielding a field shaped ``(B, S, ceil(D/3), 3)``. Padding is removed from
+    the returned latent gradient.
+    """
+
+    @staticmethod
+    def _as_field(x: jnp.ndarray) -> Tuple[jnp.ndarray, int]:
+        if x.ndim != 3:
+            raise ValueError(
+                "SequenceNavierStokesEnergy requires rank-3 (B,S,D) tensors"
+            )
+        original_dim = x.shape[-1]
+        padding = (-original_dim) % 3
+        if padding:
+            x = jnp.pad(x, ((0, 0), (0, 0), (0, padding)))
+        return x.reshape(x.shape[0], x.shape[1], -1, 3), original_dim
+
+    @staticmethod
+    def energy(z_latent, z_mu, config=None, context=None):
+        latent_field, _ = SequenceNavierStokesEnergy._as_field(z_latent)
+        prediction_field, _ = SequenceNavierStokesEnergy._as_field(z_mu)
+        return NavierStokesEnergy.energy(
+            latent_field, prediction_field, config=config, context=context
+        )
+
+    @staticmethod
+    def grad_latent(z_latent, z_mu, config=None, context=None):
+        def total_energy(latent):
+            return jnp.sum(
+                SequenceNavierStokesEnergy.energy(
+                    latent, z_mu, config=config, context=context
+                )
             )
 
         return jax.grad(total_energy)(z_latent)
