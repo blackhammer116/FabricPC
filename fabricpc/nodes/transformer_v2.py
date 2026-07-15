@@ -417,6 +417,7 @@ def create_deep_transformer(
     vocab_size: int,
     inference: InferenceBase,
     weight_init: Optional[Dict[str, Any]] = None,
+    residual_energy=None,
 ):
     """
     Creates a deep transformer graph using the new class-based builder API.
@@ -459,6 +460,7 @@ def create_deep_transformer(
             embed_dim=embed_dim,
             num_heads=num_heads,
             weight_init=w_init_obj,
+            energy=residual_energy,
         )
         nodes.append(mha)
         edges.append(Edge(source=previous_residual, target=mha.slot("in")))
@@ -480,6 +482,7 @@ def create_deep_transformer(
             embed_dim=embed_dim,
             ff_dim=mlp_dim,
             weight_init=w_init_obj,
+            energy=residual_energy,
         )
         nodes.append(mlp2)
         edges.append(Edge(source=mlp1, target=mlp2.slot("in")))
