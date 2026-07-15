@@ -22,6 +22,7 @@ def scale_by_hj_ot(
     beta2: float = 0.999,
     eps: float = 1e-8,
     nesterov: bool = False,
+    stable_dynamics: bool = False,
 ) -> optax.GradientTransformation:
     """
     Scales updates by simulating Hamilton-Jacobi Optimal Transport with adaptive scaling.
@@ -44,6 +45,10 @@ def scale_by_hj_ot(
         beta2: Exponential decay rate for the second-moment estimate.
         eps: Small constant for numerical stability during scaling.
         nesterov: Whether to use Nesterov-style momentum.
+        stable_dynamics: Use a force-balanced discretization whose steady-state
+            velocity is independent of viscosity. The legacy discretization
+            amplifies a constant normalized gradient by approximately
+            ``1 / (1 - viscosity)``.
     """
 
     def init_fn(params):
@@ -75,18 +80,19 @@ def scale_by_hj_ot(
             # This turns the transport into a "preconditioned" flow
             g_scaled = g / (jnp.sqrt(n / bias_corr) + eps)
 
-            # 1. Viscous drag using dynamic viscosity
-            drag = (1.0 - current_visc) * m
-
-            # 2. Convective transport cost (non-linear dissipation).
-            convective = transport_cost * m * jnp.abs(m)
-
-            # 3. Semi-implicit integration:
-            # Solve for new_m: new_m = m + (dt/M) * (g_scaled - DRAG(new_m) - CONV(new_m))
-            denominator = 1.0 + (dt / mass) * (
-                1.0 - current_visc + transport_cost * jnp.abs(m)
-            )
-            new_m = (m + (dt / mass) * g_scaled) / denominator
+            if stable_dynamics:
+                # Force-balanced viscous transport.  The (1-viscosity) factor
+                # is essential: for a constant force and zero transport cost,
+                # m converges to g_scaled instead of g_scaled/(1-viscosity).
+                force_scale = (dt / mass) * (1.0 - current_visc)
+                denominator = 1.0 + (dt / mass) * transport_cost * jnp.abs(m)
+                new_m = (current_visc * m + force_scale * g_scaled) / denominator
+            else:
+                # Legacy semi-implicit update retained for reproducibility.
+                denominator = 1.0 + (dt / mass) * (
+                    1.0 - current_visc + transport_cost * jnp.abs(m)
+                )
+                new_m = (m + (dt / mass) * g_scaled) / denominator
 
             if nesterov:
                 # Nesterov lookahead: return the velocity evaluated at the next step
@@ -118,6 +124,7 @@ def hj_ot_optimizer(
     eps: float = 1e-8,
     gradient_centering: bool = True,
     nesterov: bool = False,
+    stable_dynamics: bool = False,
 ) -> optax.GradientTransformation:
     """
     Creates an optimizer based on Hamilton-Jacobi Optimal Transport.
@@ -135,6 +142,8 @@ def hj_ot_optimizer(
         eps: Epsilon for adaptive scaling stability.
         gradient_centering: Whether to center gradients (improves stability).
         nesterov: Whether to use Nesterov momentum.
+        stable_dynamics: Enable the force-balanced HJ-OT discretization. This
+            is recommended for deep models; False preserves legacy behavior.
     """
     chain = []
     if gradient_centering:
@@ -153,6 +162,7 @@ def hj_ot_optimizer(
                 beta2=beta2,
                 eps=eps,
                 nesterov=nesterov,
+                stable_dynamics=stable_dynamics,
             ),
             optax.add_decayed_weights(weight_decay),
             optax.scale_by_learning_rate(learning_rate),
