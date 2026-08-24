@@ -61,7 +61,6 @@ def run_regime(name: str, args, dataset):
     use_ns = name == "ns_hj_ot"
     structure = corrected_structure(
         infer_steps=args.infer_steps,
-        use_navier_stokes=use_ns,
     )
     master_key = jax.random.PRNGKey(args.seed)
     param_key, train_key = jax.random.split(master_key)
